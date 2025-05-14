@@ -1,0 +1,161 @@
+import pulp
+import pandas as pd
+
+def otimizar_transporte_com_estatisticas(df_saldos, df_rotas):
+    """
+    Otimiza o transporte com capacidade máxima e gera estatísticas detalhadas
+    
+    Parâmetros:
+    df_saldos - DataFrame com colunas: PRACA, SALDO, DATA
+    df_rotas - DataFrame com colunas: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
+    
+    Retorna:
+    Dicionário com:
+    - 'rotas_selecionadas': DataFrame com rotas utilizadas
+    - 'saldo_pracas': DataFrame com saldos inicial e final por praça
+    - 'resumo_rotas': DataFrame com contagem de usos por rota
+    - 'custo_total': Custo total da operação
+    """
+    
+    # Criar cópia dos dados originais para preservar informações
+    df_saldos_original = df_saldos.copy()
+    df_rotas_original = df_rotas.copy()
+    
+    # Criar identificador único para cada rota
+    df_rotas = df_rotas.reset_index().rename(columns={'index': 'rota_id'})
+    
+    # Criar o problema de otimização
+    prob = pulp.LpProblem("Transporte_com_Capacidade_Maxima", pulp.LpMinimize)
+    
+    # Conjuntos
+    locais_positivos = df_saldos[df_saldos['SALDO'] > 0]['PRACA'].tolist()
+    locais_negativos = df_saldos[df_saldos['SALDO'] < 0]['PRACA'].tolist()
+    todas_pracas = df_saldos['PRACA'].unique().tolist()
+    
+    # Variáveis de decisão binárias
+    var_uso_rota = pulp.LpVariable.dicts(
+        "Usar_Rota",
+        df_rotas['rota_id'].tolist(),
+        cat='Binary'
+    )
+    
+    # Função objetivo: minimizar o custo total
+    prob += pulp.lpSum(
+        var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO'] * row['CUSTO']
+        for _, row in df_rotas.iterrows()
+    )
+    
+    # Restrições
+    ## Não exceder saldo disponível nos locais de origem
+    for local in locais_positivos:
+        prob += pulp.lpSum(
+            var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO']
+            for _, row in df_rotas[df_rotas['ORIGEM'] == local].iterrows()
+        ) <= df_saldos[df_saldos['PRACA'] == local]['SALDO'].values[0]
+    
+    ## Atender toda a demanda dos locais com saldo negativo
+    for local in locais_negativos:
+        prob += pulp.lpSum(
+            var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO']
+            for _, row in df_rotas[df_rotas['DESTINO'] == local].iterrows()
+        ) >= -df_saldos[df_saldos['PRACA'] == local]['SALDO'].values[0]
+    
+    # Resolver o problema
+    prob.solve()
+    
+    # Processar resultados
+    if pulp.LpStatus[prob.status] == 'Optimal':
+        # 1. Rotas selecionadas
+        rotas_selecionadas = []
+        for _, row in df_rotas.iterrows():
+            if var_uso_rota[row['rota_id']].value() == 1:
+                rotas_selecionadas.append({
+                    'ORIGEM': row['ORIGEM'],
+                    'DESTINO': row['DESTINO'],
+                    'EMPRESA': row['EMPRESA'],
+                    'VALOR_TRANSPORTADO': row['VALOR_TRANSPORTADO'],
+                    'CUSTO_UNITARIO': row['CUSTO'],
+                    'CUSTO_TOTAL': row['VALOR_TRANSPORTADO'] * row['CUSTO']
+                })
+        
+        df_rotas_selecionadas = pd.DataFrame(rotas_selecionadas)
+        custo_total = df_rotas_selecionadas['CUSTO_TOTAL'].sum()
+        
+        # 2. Saldos por praça
+        saldo_inicial = df_saldos.set_index('PRACA')['SALDO'].to_dict()
+        
+        # Calcular saldo final
+        saldo_final = saldo_inicial.copy()
+        
+        # Processar envios (reduz saldo nas origens)
+        envios = df_rotas_selecionadas.groupby('ORIGEM')['VALOR_TRANSPORTADO'].sum().to_dict()
+        for origem, valor in envios.items():
+            saldo_final[origem] -= valor
+        
+        # Processar recebimentos (aumenta saldo nos destinos)
+        recebimentos = df_rotas_selecionadas.groupby('DESTINO')['VALOR_TRANSPORTADO'].sum().to_dict()
+        for destino, valor in recebimentos.items():
+            saldo_final[destino] += valor
+        
+        # DataFrame de saldos
+        df_saldos_resultado = pd.DataFrame({
+            'PRACA': todas_pracas,
+            'SALDO_INICIAL': [saldo_inicial[p] for p in todas_pracas],
+            'SALDO_FINAL': [saldo_final[p] for p in todas_pracas],
+            'ALTERACAO': [saldo_final[p] - saldo_inicial[p] for p in todas_pracas]
+        })
+        
+        # 3. Contagem de usos por rota
+        df_resumo_rotas = df_rotas_selecionadas.groupby(
+            ['ORIGEM', 'DESTINO', 'EMPRESA']
+        ).agg(
+            QUANTIDADE=('VALOR_TRANSPORTADO', 'sum'),
+            VEZES_USADA=('VALOR_TRANSPORTADO', 'size'),
+            CUSTO_TOTAL=('CUSTO_TOTAL', 'sum')
+        ).reset_index()
+        
+        return {
+            'rotas_selecionadas': df_rotas_selecionadas,
+            'saldo_pracas': df_saldos_resultado,
+            'resumo_rotas': df_resumo_rotas,
+            'custo_total': custo_total
+        }
+    else:
+        print("Não foi encontrada solução ótima.")
+        print("Status:", pulp.LpStatus[prob.status])
+        return None
+
+# Exemplo de uso
+if __name__ == "__main__":
+    # Dados de exemplo
+    data_saldos = {
+        'PRACA': ['A', 'B', 'C', 'D', 'E'],
+        'SALDO': [100, 200, -80, -120, -100],
+        'DATA': ['2023-01-01'] * 5
+    }
+    
+    data_rotas = {
+        'ORIGEM': ['A', 'A', 'A', 'B', 'B', 'B', 'B', 'B', 'C'],
+        'DESTINO': ['C', 'C', 'D', 'C', 'D', 'E', 'E', 'D', 'E'],
+        'EMPRESA': ['Trans1', 'Trans1', 'Trans1', 'Trans2', 'Trans2', 'Trans3', 'Trans3', 'Trans2', 'Trans4'],
+        'VALOR_TRANSPORTADO': [40, 50, 60, 70, 80, 90, 100, 30, 20],
+        'CUSTO': [10, 9, 15, 12, 18, 20, 19, 16, 25]
+    }
+    
+    df_saldos = pd.DataFrame(data_saldos)
+    df_rotas = pd.DataFrame(data_rotas)
+    
+    # Executar a otimização
+    resultado = otimizar_transporte_com_estatisticas(df_saldos, df_rotas)
+    
+    if resultado is not None:
+        print(f"\nCusto total da operação: R${resultado['custo_total']:.2f}")
+        
+        print("\nSaldo inicial e final por praça:")
+        print(resultado['saldo_pracas'].to_string(index=False))
+        
+        print("\nResumo de rotas utilizadas:")
+        print(resultado['resumo_rotas'].to_string(index=False))
+        
+        print("\nDetalhes das rotas selecionadas:")
+        print(resultado['rotas_selecionadas'].to_string(index=False))
