@@ -6,8 +6,8 @@ def otimizar_transporte_capacidade_maxima(df_saldos, df_rotas):
     Otimiza o transporte obrigando que as rotas selecionadas operem em capacidade máxima
     
     Parâmetros:
-    df_saldos - DataFrame com colunas: praca, saldo
-    df_rotas - DataFrame com colunas: origem, destino, empresa, quantidade_transportada, custo_transporte
+    df_saldos - DataFrame com colunas: PRACA, SALDO, DATA
+    df_rotas - DataFrame com colunas: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
     
     Retorna:
     DataFrame com as rotas selecionadas e suas quantidades (sempre na capacidade máxima)
@@ -20,8 +20,8 @@ def otimizar_transporte_capacidade_maxima(df_saldos, df_rotas):
     prob = pulp.LpProblem("Transporte_com_Capacidade_Maxima", pulp.LpMinimize)
     
     # Conjuntos
-    locais_positivos = df_saldos[df_saldos['saldo'] > 0]['praca'].tolist()
-    locais_negativos = df_saldos[df_saldos['saldo'] < 0]['praca'].tolist()
+    locais_positivos = df_saldos[df_saldos['SALDO'] > 0]['PRACA'].tolist()
+    locais_negativos = df_saldos[df_saldos['SALDO'] < 0]['PRACA'].tolist()
     
     # Variáveis de decisão binárias - indica se a rota é utilizada ou não
     var_uso_rota = pulp.LpVariable.dicts(
@@ -32,23 +32,23 @@ def otimizar_transporte_capacidade_maxima(df_saldos, df_rotas):
     
     # Função objetivo: minimizar o custo total
     prob += pulp.lpSum(
-        var_uso_rota[row['rota_id'] * row['quantidade_transportada'] * row['custo_transporte']
+        var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO'] * row['CUSTO']
         for _, row in df_rotas.iterrows()
     )
     
     # Restrição 1: Não exceder saldo disponível nos locais de origem
     for local in locais_positivos:
         prob += pulp.lpSum(
-            var_uso_rota[row['rota_id'] * row['quantidade_transportada']
-            for _, row in df_rotas[df_rotas['origem'] == local].iterrows()
-        ) <= df_saldos[df_saldos['praca'] == local]['saldo'].values[0]
+            var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO']
+            for _, row in df_rotas[df_rotas['ORIGEM'] == local].iterrows()
+        ) <= df_saldos[df_saldos['PRACA'] == local]['SALDO'].values[0]
     
     # Restrição 2: Atender toda a demanda dos locais com saldo negativo
     for local in locais_negativos:
         prob += pulp.lpSum(
-            var_uso_rota[row['rota_id'] * row['quantidade_transportada']
-            for _, row in df_rotas[df_rotas['destino'] == local].iterrows()
-        ) >= -df_saldos[df_saldos['praca'] == local]['saldo'].values[0]
+            var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO']
+            for _, row in df_rotas[df_rotas['DESTINO'] == local].iterrows()
+        ) >= -df_saldos[df_saldos['PRACA'] == local]['SALDO'].values[0]
     
     # Resolver o problema
     prob.solve()
@@ -59,17 +59,17 @@ def otimizar_transporte_capacidade_maxima(df_saldos, df_rotas):
         for _, row in df_rotas.iterrows():
             if var_uso_rota[row['rota_id']].value() == 1:
                 resultados.append({
-                    'Origem': row['origem'],
-                    'Destino': row['destino'],
-                    'Empresa': row['empresa'],
+                    'ORIGEM': row['ORIGEM'],
+                    'DESTINO': row['DESTINO'],
+                    'EMPRESA': row['EMPRESA'],
                     'Rota_ID': row['rota_id'],
-                    'Quantidade_Transportada': row['quantidade_transportada'],
-                    'Custo_Unitario': row['custo_transporte'],
-                    'Custo_Total': row['quantidade_transportada'] * row['custo_transporte']
+                    'VALOR_TRANSPORTADO': row['VALOR_TRANSPORTADO'],
+                    'CUSTO': row['CUSTO'],
+                    'CUSTO_TOTAL': row['VALOR_TRANSPORTADO'] * row['CUSTO']
                 })
         
         df_resultados = pd.DataFrame(resultados)
-        custo_total = df_resultados['Custo_Total'].sum()
+        custo_total = df_resultados['CUSTO_TOTAL'].sum()
         print(f"Solução ótima encontrada! Custo total: R${custo_total:.2f}")
         return df_resultados
     else:
@@ -79,18 +79,19 @@ def otimizar_transporte_capacidade_maxima(df_saldos, df_rotas):
 
 # Exemplo de uso
 if __name__ == "__main__":
-    # Dados de exemplo
+    # Dados de exemplo com as novas colunas
     data_saldos = {
-        'praca': ['A', 'B', 'C', 'D', 'E'],
-        'saldo': [100, 200, -80, -120, -100]
+        'PRACA': ['A', 'B', 'C', 'D', 'E'],
+        'SALDO': [100, 200, -80, -120, -100],
+        'DATA': ['2023-01-01', '2023-01-01', '2023-01-01', '2023-01-01', '2023-01-01']
     }
     
     data_rotas = {
-        'origem': ['A', 'A', 'A', 'B', 'B', 'B', 'B'],
-        'destino': ['C', 'C', 'D', 'C', 'D', 'E', 'E'],
-        'empresa': ['Trans1', 'Trans1', 'Trans1', 'Trans2', 'Trans2', 'Trans3', 'Trans3'],
-        'quantidade_transportada': [40, 50, 60, 70, 80, 90, 100],
-        'custo_transporte': [10, 9, 15, 12, 18, 20, 19]
+        'ORIGEM': ['A', 'A', 'A', 'B', 'B', 'B', 'B'],
+        'DESTINO': ['C', 'C', 'D', 'C', 'D', 'E', 'E'],
+        'EMPRESA': ['Trans1', 'Trans1', 'Trans1', 'Trans2', 'Trans2', 'Trans3', 'Trans3'],
+        'VALOR_TRANSPORTADO': [40, 50, 60, 70, 80, 90, 100],
+        'CUSTO': [10, 9, 15, 12, 18, 20, 19]
     }
     
     df_saldos = pd.DataFrame(data_saldos)
@@ -101,4 +102,4 @@ if __name__ == "__main__":
     
     if resultado is not None:
         print("\nRotas selecionadas:")
-        print(resultado[['Origem', 'Destino', 'Empresa', 'Quantidade_Transportada', 'Custo_Total']])
+        print(resultado[['ORIGEM', 'DESTINO', 'EMPRESA', 'VALOR_TRANSPORTADO', 'CUSTO_TOTAL']])
