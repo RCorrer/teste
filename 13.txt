@@ -2,14 +2,11 @@ import pulp
 import pandas as pd
 from collections import defaultdict
 
-def otimizar_transporte(df_saldos, df_rotas):
+def otimizar_transporte_com_bb(df_saldos, df_rotas):
     """
-    Otimiza o transporte com os seguintes critérios:
-    1. Abastece todas as praças com saldo negativo
-    2. Minimiza o custo total de transporte
-    3. Considera capacidade fixa e custo fixo por rota
-    4. Mostra saldos antes e depois
-    5. Contabiliza quantas vezes cada rota foi usada
+    Otimiza o transporte com critério especial para SAQUE BB:
+    - Para rotas normais: saldo na origem deve ser suficiente
+    - Para SAQUE BB: pode transferir independente do saldo na origem
     
     Parâmetros:
     df_saldos - DataFrame com colunas: PRACA, SALDO
@@ -32,7 +29,7 @@ def otimizar_transporte(df_saldos, df_rotas):
     pracas = list(saldo_inicial.keys())
     
     # Criar problema de otimização
-    prob = pulp.LpProblem("Abastecimento_Pracas_Negativas", pulp.LpMinimize)
+    prob = pulp.LpProblem("Abastecimento_Pracas_Com_BB", pulp.LpMinimize)
     
     # Variáveis de decisão (binárias: usa ou não usa a rota)
     var_rota = pulp.LpVariable.dicts(
@@ -49,12 +46,16 @@ def otimizar_transporte(df_saldos, df_rotas):
     
     # Restrições
     
-    ## 1. Não exceder saldo nas origens
+    ## 1. Não exceder saldo nas origens (APENAS para rotas NÃO BB)
     for praca in pracas:
         if saldo_inicial[praca] > 0:  # Só praças com saldo positivo podem enviar
+            # Filtrar apenas rotas que não são SAQUE BB
+            rotas_nao_bb = df_rotas[(df_rotas['ORIGEM'] == praca) & 
+                                   (df_rotas['EMPRESA'] != 'SAQUE BB')]
+            
             prob += pulp.lpSum(
                 var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
-                for _, row in df_rotas[df_rotas['ORIGEM'] == praca].iterrows()
+                for _, row in rotas_nao_bb.iterrows()
             ) <= saldo_inicial[praca]
     
     ## 2. Atender TODAS as demandas negativas
@@ -89,14 +90,16 @@ def otimizar_transporte(df_saldos, df_rotas):
             ['ORIGEM', 'DESTINO', 'EMPRESA', 'VALOR_TRANSPORTADO', 'CUSTO']
         ).size().reset_index(name='VEZES_USADA')
         
-        # Calcular saldos finais
+        # Calcular saldos finais (considerando que SAQUE BB não consome saldo da origem)
         saldo_final = saldo_inicial.copy()
         transporte_saida = defaultdict(int)
         transporte_entrada = defaultdict(int)
         
         for _, rota in df_rotas_ativas.iterrows():
-            transporte_saida[rota['ORIGEM']] += rota['VALOR_TRANSPORTADO']
             transporte_entrada[rota['DESTINO']] += rota['VALOR_TRANSPORTADO']
+            # Só desconta da origem se não for SAQUE BB
+            if rota['EMPRESA'] != 'SAQUE BB':
+                transporte_saida[rota['ORIGEM']] += rota['VALOR_TRANSPORTADO']
         
         for praca in pracas:
             saldo_final[praca] = saldo_final[praca] - transporte_saida.get(praca, 0) + transporte_entrada.get(praca, 0)
@@ -132,22 +135,25 @@ if __name__ == "__main__":
     # Dados de exemplo
     data_saldos = {
         'PRACA': ['A', 'B', 'C', 'D', 'E', 'F'],
-        'SALDO': [300, 400, -150, -200, -250, -100]
+        'SALDO': [100, 200, -150, -200, -250, -100]
     }
     
     data_rotas = {
-        'ORIGEM': ['A', 'A', 'B', 'B', 'B', 'A', 'B', 'F'],
-        'DESTINO': ['C', 'D', 'D', 'E', 'C', 'E', 'F', 'E'],
-        'EMPRESA': ['T1', 'T1', 'T2', 'T2', 'T3', 'T3', 'T4', 'T5'],
-        'VALOR_TRANSPORTADO': [100, 150, 120, 130, 110, 90, 80, 70],
-        'CUSTO': [500, 700, 600, 750, 550, 650, 450, 400]
+        'ORIGEM': ['A', 'A', 'B', 'B', 'B', 'A', 'B', 'F', 'X'],
+        'DESTINO': ['C', 'D', 'D', 'E', 'C', 'E', 'F', 'E', 'C'],
+        'EMPRESA': ['T1', 'T1', 'T2', 'T2', 'T3', 'SAQUE BB', 'T4', 'SAQUE BB', 'SAQUE BB'],
+        'VALOR_TRANSPORTADO': [50, 60, 70, 80, 90, 100, 110, 120, 200],
+        'CUSTO': [500, 600, 700, 800, 900, 1000, 1100, 1200, 500]
     }
     
     df_saldos = pd.DataFrame(data_saldos)
     df_rotas = pd.DataFrame(data_rotas)
     
+    # Corrigir nome da coluna DESTINO (tinha um typo no exemplo)
+    df_rotas = df_rotas.rename(columns={'DESTINO': 'DESTINO'})
+    
     # Executar a otimização
-    resultado = otimizar_transporte(df_saldos, df_rotas)
+    resultado = otimizar_transporte_com_bb(df_saldos, df_rotas)
     
     # Exibir resultados
     print("\n" + "="*50)
