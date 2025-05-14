@@ -1,0 +1,130 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lit, sum as spark_sum
+from pyspark.sql.window import Window
+import pulp
+
+def otimizar_transporte_spark(df_saldos, df_rotas):
+    """
+    Otimiza o transporte usando Spark, obrigando que as rotas selecionadas operem em capacidade máxima
+    
+    Parâmetros:
+    df_saldos - DataFrame Spark com colunas: praca, saldo
+    df_rotas - DataFrame Spark com colunas: origem, destino, empresa, quantidade_transportada, custo_transporte
+    
+    Retorna:
+    DataFrame Spark com as rotas selecionadas e suas quantidades (sempre na capacidade máxima)
+    """
+    
+    # Adicionar ID único para cada rota
+    window = Window.orderBy("origem", "destino", "empresa")
+    df_rotas = df_rotas.withColumn("rota_id", spark_functions.row_number().over(window))
+    
+    # Coletar dados necessários para o driver (como são pequenos, podemos trazer para a memória)
+    saldos_data = df_saldos.collect()
+    rotas_data = df_rotas.collect()
+    
+    # Criar o problema de otimização
+    prob = pulp.LpProblem("Transporte_com_Capacidade_Maxima", pulp.LpMinimize)
+    
+    # Preparar conjuntos
+    locais_positivos = [row['praca'] for row in saldos_data if row['saldo'] > 0]
+    locais_negativos = [row['praca'] for row in saldos_data if row['saldo'] < 0]
+    saldos_dict = {row['praca']: row['saldo'] for row in saldos_data}
+    
+    # Variáveis de decisão binárias
+    var_uso_rota = pulp.LpVariable.dicts(
+        "Usar_Rota",
+        [row['rota_id'] for row in rotas_data],
+        cat='Binary'
+    )
+    
+    # Função objetivo: minimizar o custo total
+    prob += pulp.lpSum(
+        var_uso_rota[row['rota_id'] * row['quantidade_transportada'] * row['custo_transporte']
+        for row in rotas_data
+    )
+    
+    # Restrição 1: Não exceder saldo disponível nos locais de origem
+    for local in locais_positivos:
+        prob += pulp.lpSum(
+            var_uso_rota[row['rota_id']] * row['quantidade_transportada']
+            for row in rotas_data if row['origem'] == local
+        ) <= saldos_dict[local]
+    
+    # Restrição 2: Atender toda a demanda dos locais com saldo negativo
+    for local in locais_negativos:
+        prob += pulp.lpSum(
+            var_uso_rota[row['rota_id']] * row['quantidade_transportada']
+            for row in rotas_data if row['destino'] == local
+        ) >= -saldos_dict[local]
+    
+    # Resolver o problema
+    prob.solve()
+    
+    # Processar resultados
+    if pulp.LpStatus[prob.status] == 'Optimal':
+        # Criar lista com rotas selecionadas
+        rotas_selecionadas = [
+            {
+                'rota_id': row['rota_id'],
+                'Origem': row['origem'],
+                'Destino': row['destino'],
+                'Empresa': row['empresa'],
+                'Quantidade_Transportada': row['quantidade_transportada'],
+                'Custo_Unitario': row['custo_transporte'],
+                'Custo_Total': row['quantidade_transportada'] * row['custo_transporte'],
+                'Selecionada': var_uso_rota[row['rota_id']].value() == 1
+            }
+            for row in rotas_data
+        ]
+        
+        # Filtrar apenas rotas selecionadas e calcular custo total
+        rotas_selecionadas = [r for r in rotas_selecionadas if r['Selecionada']]
+        custo_total = sum(r['Custo_Total'] for r in rotas_selecionadas)
+        
+        print(f"Solução ótima encontrada! Custo total: R${custo_total:.2f}")
+        
+        # Converter para DataFrame Spark
+        spark = SparkSession.builder.getOrCreate()
+        df_resultado = spark.createDataFrame(rotas_selecionadas)
+        
+        return df_resultado.drop("Selecionada")
+    else:
+        print("Não foi encontrada solução ótima.")
+        print("Status:", pulp.LpStatus[prob.status])
+        return None
+
+# Exemplo de uso
+if __name__ == "__main__":
+    # Inicializar Spark
+    spark = SparkSession.builder.appName("OtimizacaoTransporte").getOrCreate()
+    
+    # Dados de exemplo
+    data_saldos = [
+        {'praca': 'A', 'saldo': 100},
+        {'praca': 'B', 'saldo': 200},
+        {'praca': 'C', 'saldo': -80},
+        {'praca': 'D', 'saldo': -120},
+        {'praca': 'E', 'saldo': -100}
+    ]
+    
+    data_rotas = [
+        {'origem': 'A', 'destino': 'C', 'empresa': 'Trans1', 'quantidade_transportada': 40, 'custo_transporte': 10},
+        {'origem': 'A', 'destino': 'C', 'empresa': 'Trans1', 'quantidade_transportada': 50, 'custo_transporte': 9},
+        {'origem': 'A', 'destino': 'D', 'empresa': 'Trans1', 'quantidade_transportada': 60, 'custo_transporte': 15},
+        {'origem': 'B', 'destino': 'C', 'empresa': 'Trans2', 'quantidade_transportada': 70, 'custo_transporte': 12},
+        {'origem': 'B', 'destino': 'D', 'empresa': 'Trans2', 'quantidade_transportada': 80, 'custo_transporte': 18},
+        {'origem': 'B', 'destino': 'E', 'empresa': 'Trans3', 'quantidade_transportada': 90, 'custo_transporte': 20},
+        {'origem': 'B', 'destino': 'E', 'empresa': 'Trans3', 'quantidade_transportada': 100, 'custo_transporte': 19}
+    ]
+    
+    # Criar DataFrames Spark
+    df_saldos = spark.createDataFrame(data_saldos)
+    df_rotas = spark.createDataFrame(data_rotas)
+    
+    # Executar a otimização
+    resultado = otimizar_transporte_spark(df_saldos, df_rotas)
+    
+    if resultado is not None:
+        print("\nRotas selecionadas:")
+        resultado.show()
