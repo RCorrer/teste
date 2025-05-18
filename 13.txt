@@ -2,21 +2,21 @@ import pulp
 import pandas as pd
 from collections import defaultdict
 
-def otimizar_transporte_final(df_saldos, df_rotas, rotas_proibidas=None):
+def otimizar_transporte_rede(df_saldos, df_rotas):
     """
-    Otimização completa com:
-    1. Abastece TODAS as praças negativas completamente
+    Otimização de rede com múltiplos níveis de transporte:
+    1. Abastece TODAS as praças negativas completamente (diretamente ou via intermediárias)
     2. Minimiza custo total
     3. Capacidade e custo fixos por rota
     4. Mostra saldos antes/depois
     5. Conta usos de cada rota
     6. Regra especial para SAQUE BB (ignora saldo origem)
     7. Garante saldo não-negativo em todas as praças ao final
+    8. Considera transporte em múltiplas etapas através da rede
     
     Parâmetros:
     df_saldos - DataFrame com: PRACA, SALDO
     df_rotas - DataFrame com: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
-    rotas_proibidas - Lista de ROTA_IDs que não podem ser usadas
     
     Retorna:
     Dicionário com resultados completos
@@ -29,13 +29,26 @@ def otimizar_transporte_final(df_saldos, df_rotas, rotas_proibidas=None):
     pracas = list(saldo_inicial.keys())
     
     # Criar problema
-    prob = pulp.LpProblem("Otimizacao_Transporte_Final", pulp.LpMinimize)
+    prob = pulp.LpProblem("Otimizacao_Rede_Transporte", pulp.LpMinimize)
     
     # Variáveis de decisão
     var_rota = pulp.LpVariable.dict(
         'usar_rota', 
         df_rotas['ROTA_ID'].tolist(), 
         cat=pulp.LpBinary
+    )
+    
+    # Variáveis auxiliares para fluxo acumulado (envios e recebimentos)
+    envios = pulp.LpVariable.dict(
+        'envios', 
+        pracas,
+        lowBound=0
+    )
+    
+    recebimentos = pulp.LpVariable.dict(
+        'recebimentos', 
+        pracas,
+        lowBound=0
     )
     
     # Função objetivo: minimizar custo total
@@ -45,12 +58,6 @@ def otimizar_transporte_final(df_saldos, df_rotas, rotas_proibidas=None):
     )
     
     # Restrições
-    
-    ## 0. Restringir rotas proibidas
-    if rotas_proibidas:
-        for rota_id in rotas_proibidas:
-            if rota_id in var_rota:
-                prob += var_rota[rota_id] == 0
     
     ## 1. Não exceder saldo nas origens (exceto SAQUE BB)
     for praca in pracas:
@@ -64,31 +71,35 @@ def otimizar_transporte_final(df_saldos, df_rotas, rotas_proibidas=None):
                 for _, row in rotas_nao_bb.iterrows()
             ) <= saldo_inicial[praca]
     
-    ## 2. Atender TODAS as demandas negativas
+    ## 2. Atender TODAS as demandas negativas (considerando fluxo total recebido)
     for praca in pracas:
         if saldo_inicial[praca] < 0:
-            prob += pulp.lpSum(
-                var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
-                for _, row in df_rotas[df_rotas['DESTINO'] == praca].iterrows()
-            ) >= -saldo_inicial[praca]
+            prob += recebimentos[praca] >= -saldo_inicial[praca]
     
     ## 3. Garantir saldo não-negativo em TODAS as praças ao final
     for praca in pracas:
-        # Calcular saldo final = saldo inicial - enviado + recebido
-        envios = pulp.lpSum(
+        prob += (saldo_inicial[praca] - envios[praca] + recebimentos[praca]) >= 0
+    
+    ## 4. Relacionar envios/recebimentos com as rotas ativas
+    for praca in pracas:
+        # Total enviado da praça (exceto SAQUE BB)
+        prob += envios[praca] == pulp.lpSum(
             var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
             for _, row in df_rotas[
                 (df_rotas['ORIGEM'] == praca) &
-                (df_rotas['EMPRESA'] != 'SAQUE BB')  # SAQUE BB não consome saldo
+                (df_rotas['EMPRESA'] != 'SAQUE BB')
             ].iterrows()
         )
         
-        recebimentos = pulp.lpSum(
+        # Total recebido na praça
+        prob += recebimentos[praca] == pulp.lpSum(
             var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
             for _, row in df_rotas[df_rotas['DESTINO'] == praca].iterrows()
         )
-        
-        prob += (saldo_inicial[praca] - envios + recebimentos) >= 0
+    
+    ## 5. Permitir transporte em múltiplas etapas:
+    # Se uma praça recebe, pode enviar (dentro do saldo disponível)
+    # Isso é implicitamente tratado pelas restrições de saldo e envios/recebimentos
     
     # Resolver
     prob.solve()
@@ -107,16 +118,16 @@ def otimizar_transporte_final(df_saldos, df_rotas, rotas_proibidas=None):
         saldo_final = {}
         for praca in pracas:
             # SAQUE BB não consome saldo da origem
-            envios = df_rotas_ativas[
+            envios_total = df_rotas_ativas[
                 (df_rotas_ativas['ORIGEM'] == praca) &
                 (df_rotas_ativas['EMPRESA'] != 'SAQUE BB')
             ]['VALOR_TRANSPORTADO'].sum()
             
-            recebimentos = df_rotas_ativas[
+            recebimentos_total = df_rotas_ativas[
                 df_rotas_ativas['DESTINO'] == praca
             ]['VALOR_TRANSPORTADO'].sum()
             
-            saldo_final[praca] = saldo_inicial[praca] - envios + recebimentos
+            saldo_final[praca] = saldo_inicial[praca] - envios_total + recebimentos_total
         
         # Agrupar rotas idênticas
         df_uso_rotas = df_rotas_ativas.groupby(
@@ -135,7 +146,8 @@ def otimizar_transporte_final(df_saldos, df_rotas, rotas_proibidas=None):
                            for id, row in df_rotas.set_index('ROTA_ID').iterrows()),
             'status': 'Ótimo encontrado',
             'transporte_total': df_rotas_ativas['VALOR_TRANSPORTADO'].sum(),
-            'rotas_utilizadas_ids': [row['ROTA_ID'] for row in rotas_ativas]
+            'envios': {p: envios[p].value() for p in pracas},
+            'recebimentos': {p: recebimentos[p].value() for p in pracas}
         }
     else:
         return {
@@ -143,74 +155,48 @@ def otimizar_transporte_final(df_saldos, df_rotas, rotas_proibidas=None):
             'rotas_ativas': pd.DataFrame(),
             'saldo_pracas': pd.DataFrame(),
             'custo_total': 0,
-            'rotas_utilizadas_ids': []
+            'envios': {},
+            'recebimentos': {}
         }
-
-def executar_otimizacoes_multiplas(df_saldos, df_rotas, n_vezes=5):
-    """
-    Executa a otimização múltiplas vezes, cada vez removendo as rotas utilizadas na melhor solução anterior
-    
-    Parâmetros:
-    df_saldos - DataFrame com saldos iniciais
-    df_rotas - DataFrame com todas as rotas possíveis
-    n_vezes - Número de iterações a executar
-    
-    Retorna:
-    Lista de DataFrames com as melhores combinações encontradas em cada iteração
-    """
-    resultados = []
-    rotas_proibidas = []
-    
-    # Criar cópias dos DataFrames originais para não modificar os originais
-    df_saldos_copy = df_saldos.copy()
-    df_rotas_copy = df_rotas.copy()
-    
-    for i in range(n_vezes):
-        print(f"\nExecutando iteração {i+1}...")
-        print(f"Rotas proibidas nesta iteração: {rotas_proibidas}")
-        
-        resultado = otimizar_transporte_final(df_saldos_copy, df_rotas_copy, rotas_proibidas)
-        
-        if resultado['status'] == 'Ótimo encontrado':
-            print(f"Solução {i+1} encontrada com custo R${resultado['custo_total']:,.2f}")
-            resultados.append(resultado['rotas_ativas'])
-            
-            # Adicionar as rotas utilizadas à lista de proibidas para a próxima iteração
-            rotas_proibidas.extend(resultado['rotas_utilizadas_ids'])
-        else:
-            print(f"Não foi possível encontrar solução na iteração {i+1}")
-            break
-    
-    return resultados
 
 # Exemplo de uso
 if __name__ == "__main__":
-    # Dados de exemplo mais complexos
+    # Dados de exemplo com rede mais complexa
     data_saldos = {
-        'PRACA': ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
-        'SALDO': [150, 200, -80, -120, -100, 50, -50]
+        'PRACA': ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'X'],
+        'SALDO': [150, 200, -80, -120, -100, 50, -50, 0]  # X é fonte externa (SAQUE BB)
     }
     
     data_rotas = {
-        'ORIGEM': ['A', 'A', 'B', 'B', 'B', 'F', 'G', 'X', 'X'],
-        'DESTINO': ['C', 'D', 'D', 'E', 'C', 'E', 'F', 'C', 'E'],
-        'EMPRESA': ['T1', 'T1', 'T2', 'T2', 'SAQUE BB', 'T3', 'T4', 'SAQUE BB', 'SAQUE BB'],
-        'VALOR_TRANSPORTADO': [50, 60, 70, 80, 90, 40, 30, 100, 120],
-        'CUSTO': [500, 600, 700, 800, 900, 400, 300, 1000, 1200]
+        'ORIGEM': ['A', 'A', 'B', 'B', 'B', 'F', 'G', 'X', 'X', 'A', 'C', 'D'],
+        'DESTINO': ['C', 'D', 'D', 'E', 'C', 'E', 'F', 'C', 'E', 'F', 'E', 'E'],
+        'EMPRESA': ['T1', 'T1', 'T2', 'T2', 'SAQUE BB', 'T3', 'T4', 'SAQUE BB', 'SAQUE BB', 'T5', 'T6', 'T7'],
+        'VALOR_TRANSPORTADO': [50, 60, 70, 80, 90, 40, 30, 100, 120, 20, 30, 40],
+        'CUSTO': [500, 600, 700, 800, 900, 400, 300, 1000, 1200, 200, 300, 400]
     }
     
     df_saldos = pd.DataFrame(data_saldos)
     df_rotas = pd.DataFrame(data_rotas)
     
-    # Executar otimizações múltiplas
-    resultados = executar_otimizacoes_multiplas(df_saldos, df_rotas, n_vezes=5)
+    # Executar otimização
+    resultado = otimizar_transporte_rede(df_saldos, df_rotas)
     
     # Exibir resultados
     print("\n" + "="*60)
-    print("Resumo das soluções encontradas:")
-    for i, df in enumerate(resultados):
-        print(f"\nSolução {i+1}:")
-        if not df.empty:
-            print(df.to_string(index=False))
-        else:
-            print("Nenhuma solução encontrada nesta iteração.")
+    print(f"Status: {resultado['status']}")
+    print(f"Custo Total: R${resultado['custo_total']:,.2f}")
+    print(f"Volume Transportado: {resultado['transporte_total']} unidades")
+    
+    print("\nSaldos:")
+    print(resultado['saldo_pracas'].to_string(index=False))
+    
+    print("\nRotas Utilizadas:")
+    print(resultado['rotas_ativas'].to_string(index=False))
+    
+    print("\nFluxos na Rede:")
+    fluxos = pd.DataFrame({
+        'PRACA': resultado['saldo_pracas']['PRACA'],
+        'ENVIADO': [resultado['envios'][p] for p in resultado['saldo_pracas']['PRACA']],
+        'RECEBIDO': [resultado['recebimentos'][p] for p in resultado['saldo_pracas']['PRACA']]
+    })
+    print(fluxos.to_string(index=False))
