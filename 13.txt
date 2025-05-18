@@ -1,6 +1,6 @@
 import pandas as pd
 import pulp as pl
-from itertools import islice
+from itertools import combinations
 
 # Dados de exemplo (substitua pelos seus DataFrames reais)
 df_saldo_capacita = pd.DataFrame({
@@ -27,7 +27,6 @@ pracas = df_saldo_capacita['PRACA'].unique()
 pracas_negativas = df_saldo_capacita[df_saldo_capacita['SALDO'] < 0]['PRACA'].tolist()
 pracas_positivas = df_saldo_capacita[df_saldo_capacita['SALDO'] > 0]['PRACA'].tolist()
 
-# Criar dicionários para saldos e taxas
 saldo = df_saldo_capacita.set_index('PRACA')['SALDO'].to_dict()
 tx_saque = df_tx_saque.set_index('PRACA')['TX_SAQUE'].to_dict()
 
@@ -35,8 +34,8 @@ tx_saque = df_tx_saque.set_index('PRACA')['TX_SAQUE'].to_dict()
 rotas = [(row['ORIGEM'], row['DESTINO']) for _, row in df_custos_capacita.iterrows()]
 custos_transporte = {(row['ORIGEM'], row['DESTINO']): row['CUSTO'] for _, row in df_custos_capacita.iterrows()}
 
-# 2. Função para resolver o problema para uma praça específica
-def resolver_para_praca(praca_alvo, solucoes_anteriores=None):
+# 2. Função para encontrar as k melhores soluções
+def encontrar_melhores_solucoes(praca_alvo, k=5):
     modelo = pl.LpProblem(f"Abastecimento_{praca_alvo}", pl.LpMinimize)
     
     # Variáveis de decisão
@@ -44,105 +43,81 @@ def resolver_para_praca(praca_alvo, solucoes_anteriores=None):
     s = pl.LpVariable("Saque", lowBound=0, cat='Continuous')
     
     # Função objetivo
-    modelo += pl.lpSum([x[(i,j)] * custos_transporte[(i,j)] for (i,j) in rotas]) + s * tx_saque[praca_alvo]
+    modelo += pl.lpSum([x[r] * custos_transporte[r] for r in rotas]) + s * tx_saque[praca_alvo]
     
     # Restrições
-    # Restrição de saldo nas praças positivas
     for p in pracas_positivas:
-        total_transportado = pl.lpSum([x[(i,j)] for (i,j) in rotas if i == p])
-        modelo += total_transportado <= saldo[p]
+        modelo += pl.lpSum([x[r] for r in rotas if r[0] == p]) <= saldo[p]
     
-    # Restrição de atendimento à praça alvo
-    total_recebido = pl.lpSum([x[(i,j)] for (i,j) in rotas if j == praca_alvo])
-    modelo += total_recebido + s >= -saldo[praca_alvo]
+    modelo += pl.lpSum([x[r] for r in rotas if r[1] == praca_alvo]) + s >= -saldo[praca_alvo]
     
-    # Restrições para evitar soluções repetidas
-    if solucoes_anteriores:
-        for idx, sol_ant in enumerate(solucoes_anteriores):
-            # Adiciona restrição para que a nova solução seja diferente
-            modelo += pl.lpSum([x[r] for r in rotas if sol_ant['transportes'].get(r, 0) > 0]) <= \
-                     sum(sol_ant['transportes'].values()) - 0.01
+    # Resolver e coletar soluções
+    solucoes = []
     
-    # Resolver o modelo
-    modelo.solve()
-    
-    if modelo.status == pl.LpStatusOptimal:
-        solucao = {
-            'custo_total': pl.value(modelo.objective),
-            'saque': s.varValue,
-            'transportes': {},
-            'rotas_utilizadas': []
-        }
+    for i in range(k):
+        modelo.solve()
         
-        for (i,j) in rotas:
-            valor = x[(i,j)].varValue
-            if valor > 0:
-                solucao['transportes'][(i,j)] = valor
-                solucao['rotas_utilizadas'].append({
-                    'origem': i,
-                    'destino': j,
-                    'valor_transportado': valor,
-                    'custo_transporte': custos_transporte[(i,j)],
-                    'custo_total_transporte': valor * custos_transporte[(i,j)]
-                })
-        
-        return solucao
-    return None
-
-# 3. Encontrar as 5 melhores soluções para cada praça com saldo negativo
-resultados_completos = {}
-
-for praca in pracas_negativas:
-    print(f"\nCalculando soluções para a praça {praca}...")
-    solucoes_praca = []
-    
-    # Encontrar até 5 soluções distintas
-    for i in range(5):
-        sol = resolver_para_praca(praca, solucoes_praca)
-        if sol:
-            solucoes_praca.append(sol)
-            print(f"  Solução {i+1}: Custo {sol['custo_total']:.2f}")
-        else:
+        if modelo.status != pl.LpStatusOptimal:
             break
+            
+        # Coletar valores das variáveis
+        transporte = {r: x[r].varValue for r in rotas if x[r].varValue > 0}
+        saque = s.varValue
+        
+        # Adicionar solução
+        solucoes.append({
+            'custo_total': pl.value(modelo.objective),
+            'saque': saque,
+            'transportes': transporte,
+            'rotas_utilizadas': [{'origem': r[0], 'destino': r[1], 
+                                 'valor': x[r].varValue, 
+                                 'custo': custos_transporte[r]} 
+                                for r in rotas if x[r].varValue > 0]
+        })
+        
+        # Adicionar restrição para evitar a mesma solução
+        modelo += pl.lpSum([x[r] for r in transporte.keys()]) <= sum(transporte.values()) - 0.01
     
-    resultados_completos[praca] = solucoes_praca
+    return solucoes
 
-# 4. Processar os resultados em DataFrames
-# DataFrame com todas as soluções
-dados_solucoes = []
+# 3. Encontrar soluções para cada praça com saldo negativo
+resultados_completos = {}
+for praca in pracas_negativas:
+    resultados_completos[praca] = encontrar_melhores_solucoes(praca)
+
+# 4. Processar resultados em DataFrames
+# DataFrame detalhado com todas as rotas
+dados_detalhados = []
 for praca, solucoes in resultados_completos.items():
     for idx, sol in enumerate(solucoes, 1):
+        # Adicionar linhas para transportes
         for rota in sol['rotas_utilizadas']:
-            dados_solucoes.append({
+            dados_detalhados.append({
                 'PRACA_ALVO': praca,
                 'OPCAO_NUM': idx,
-                'MELHOR_OPCAO': idx == 1,
+                'TIPO': 'TRANSPORTE',
                 'ORIGEM': rota['origem'],
                 'DESTINO': rota['destino'],
-                'VALOR_TRANSPORTADO': rota['valor_transportado'],
-                'CUSTO_UNITARIO_TRANSPORTE': rota['custo_transporte'],
-                'CUSTO_TOTAL_TRANSPORTE': rota['custo_total_transporte'],
-                'VALOR_SACADO': sol['saque'],
-                'CUSTO_SAQUE': sol['saque'] * tx_saque[praca],
+                'VALOR': rota['valor'],
+                'CUSTO_UNITARIO': rota['custo'],
+                'CUSTO_TOTAL': rota['valor'] * rota['custo'],
                 'CUSTO_TOTAL_OPCAO': sol['custo_total']
             })
-        # Adicionar linha para o saque mesmo quando não há rotas
-        if not sol['rotas_utilizadas']:
-            dados_solucoes.append({
-                'PRACA_ALVO': praca,
-                'OPCAO_NUM': idx,
-                'MELHOR_OPCAO': idx == 1,
-                'ORIGEM': None,
-                'DESTINO': None,
-                'VALOR_TRANSPORTADO': 0,
-                'CUSTO_UNITARIO_TRANSPORTE': 0,
-                'CUSTO_TOTAL_TRANSPORTE': 0,
-                'VALOR_SACADO': sol['saque'],
-                'CUSTO_SAQUE': sol['saque'] * tx_saque[praca],
-                'CUSTO_TOTAL_OPCAO': sol['custo_total']
-            })
+        
+        # Adicionar linha para saque (mesmo que zero)
+        dados_detalhados.append({
+            'PRACA_ALVO': praca,
+            'OPCAO_NUM': idx,
+            'TIPO': 'SAQUE',
+            'ORIGEM': None,
+            'DESTINO': None,
+            'VALOR': sol['saque'],
+            'CUSTO_UNITARIO': tx_saque[praca],
+            'CUSTO_TOTAL': sol['saque'] * tx_saque[praca],
+            'CUSTO_TOTAL_OPCAO': sol['custo_total']
+        })
 
-df_solucoes_completas = pd.DataFrame(dados_solucoes)
+df_detalhado = pd.DataFrame(dados_detalhados)
 
 # DataFrame consolidado por opção
 dados_consolidados = []
@@ -152,41 +127,30 @@ for praca, solucoes in resultados_completos.items():
             'PRACA_ALVO': praca,
             'OPCAO_NUM': idx,
             'MELHOR_OPCAO': idx == 1,
-            'NUM_ROTAS': len(sol['rotas_utilizadas']),
-            'TOTAL_TRANSPORTADO': sum(r['valor_transportado'] for r in sol['rotas_utilizadas']),
-            'CUSTO_TOTAL_TRANSPORTE': sum(r['custo_total_transporte'] for r in sol['rotas_utilizadas']),
-            'VALOR_SACADO': sol['saque'],
+            'TOTAL_TRANSPORTADO': sum(r['valor'] for r in sol['rotas_utilizadas']),
+            'CUSTO_TRANSPORTE': sum(r['valor'] * r['custo'] for r in sol['rotas_utilizadas']),
+            'TOTAL_SACADO': sol['saque'],
             'CUSTO_SAQUE': sol['saque'] * tx_saque[praca],
-            'CUSTO_TOTAL': sol['custo_total']
+            'CUSTO_TOTAL': sol['custo_total'],
+            'ESTRATEGIA': 'Transporte' if sum(r['valor'] for r in sol['rotas_utilizadas']) > 0 and sol['saque'] == 0 
+                          else 'Saque' if sum(r['valor'] for r in sol['rotas_utilizadas']) == 0 and sol['saque'] > 0
+                          else 'Mista'
         })
 
 df_consolidado = pd.DataFrame(dados_consolidados)
 
-# 5. Calcular totais gerais
-custo_total_melhor = df_consolidado[df_consolidado['MELHOR_OPCAO']]['CUSTO_TOTAL'].sum()
-total_transportado_melhor = df_consolidado[df_consolidado['MELHOR_OPCAO']]['TOTAL_TRANSPORTADO'].sum()
-total_sacado_melhor = df_consolidado[df_consolidado['MELHOR_OPCAO']]['VALOR_SACADO'].sum()
+# 5. Exibir resultados
+print("=== Melhores opções por praça ===")
+for praca in pracas_negativas:
+    print(f"\nPraça: {praca} (Déficit: {-saldo[praca]})")
+    df_praca = df_consolidado[df_consolidado['PRACA_ALVO'] == praca]
+    print(df_praca[['OPCAO_NUM', 'ESTRATEGIA', 'TOTAL_TRANSPORTADO', 'TOTAL_SACADO', 'CUSTO_TOTAL']])
 
-df_totais = pd.DataFrame({
-    'METRICA': ['Custo Total', 'Total Transportado', 'Total Sacado'],
-    'VALOR': [custo_total_melhor, total_transportado_melhor, total_sacado_melhor]
-})
-
-# 6. Retornar os DataFrames organizados
+# 6. Retornar DataFrames organizados
 resultados = {
-    'solucoes_detalhadas': df_solucoes_completas,
-    'solucoes_consolidadas': df_consolidado,
-    'totais_gerais': df_totais
+    'detalhes_rotas': df_detalhado,
+    'opcoes_consolidadas': df_consolidado,
+    'melhores_opcoes': df_consolidado[df_consolidado['MELHOR_OPCAO']]
 }
-
-# Exibir parte dos resultados para verificação
-print("\nSoluções detalhadas (primeiras linhas):")
-print(resultados['solucoes_detalhadas'].head())
-
-print("\nSoluções consolidadas:")
-print(resultados['solucoes_consolidadas'])
-
-print("\nTotais gerais:")
-print(resultados['totais_gerais'])
 
 resultados
