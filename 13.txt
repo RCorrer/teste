@@ -1,172 +1,209 @@
-import pulp
 import pandas as pd
-from collections import defaultdict
+import pulp as pl
 
-def otimizar_transporte_final(df_saldos, df_rotas):
-    """
-    Otimização completa com:
-    1. Abastece TODAS as praças negativas completamente
-    2. Minimiza custo total
-    3. Capacidade e custo fixos por rota
-    4. Mostra saldos antes/depois
-    5. Conta usos de cada rota
-    6. Regra especial para SAQUE BB (ignora saldo origem)
-    7. Garante saldo não-negativo em todas as praças ao final
-    
-    Parâmetros:
-    df_saldos - DataFrame com: PRACA, SALDO
-    df_rotas - DataFrame com: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
-    
-    Retorna:
-    Dicionário com resultados completos
-    """
-    
-    # Preparação dos dados
-    df_rotas = df_rotas.copy()
-    df_rotas['ROTA_ID'] = range(len(df_rotas))
-    saldo_inicial = df_saldos.set_index('PRACA')['SALDO'].to_dict()
-    pracas = list(saldo_inicial.keys())
-    
-    # Criar problema
-    prob = pulp.LpProblem("Otimizacao_Transporte_Final", pulp.LpMinimize)
-    
-    # Variáveis de decisão
-    var_rota = pulp.LpVariable.dict(
-        'usar_rota', 
-        df_rotas['ROTA_ID'].tolist(), 
-        cat=pulp.LpBinary
-    )
-    
-    # Função objetivo: minimizar custo total
-    prob += pulp.lpSum(
-        var_rota[row['ROTA_ID']] * row['CUSTO'] 
-        for _, row in df_rotas.iterrows()
-    )
-    
-    # Restrições
-    
-    ## 1. Não exceder saldo nas origens (exceto SAQUE BB)
-    for praca in pracas:
-        if saldo_inicial[praca] > 0:
-            rotas_nao_bb = df_rotas[
-                (df_rotas['ORIGEM'] == praca) & 
-                (df_rotas['EMPRESA'] != 'SAQUE BB')
-            ]
-            prob += pulp.lpSum(
-                var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
-                for _, row in rotas_nao_bb.iterrows()
-            ) <= saldo_inicial[praca]
-    
-    ## 2. Atender TODAS as demandas negativas
-    for praca in pracas:
-        if saldo_inicial[praca] < 0:
-            prob += pulp.lpSum(
-                var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
-                for _, row in df_rotas[df_rotas['DESTINO'] == praca].iterrows()
-            ) >= -saldo_inicial[praca]
-    
-    ## 3. Garantir saldo não-negativo em TODAS as praças ao final
-    for praca in pracas:
-        # Calcular saldo final = saldo inicial - enviado + recebido
-        envios = pulp.lpSum(
-            var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
-            for _, row in df_rotas[
-                (df_rotas['ORIGEM'] == praca) &
-                (df_rotas['EMPRESA'] != 'SAQUE BB')  # SAQUE BB não consome saldo
-            ].iterrows()
-        )
-        
-        recebimentos = pulp.lpSum(
-            var_rota[row['ROTA_ID']] * row['VALOR_TRANSPORTADO']
-            for _, row in df_rotas[df_rotas['DESTINO'] == praca].iterrows()
-        )
-        
-        prob += (saldo_inicial[praca] - envios + recebimentos) >= 0
-    
-    # Resolver
-    prob.solve()
-    
-    # Processar resultados
-    if pulp.LpStatus[prob.status] == 'Optimal':
-        # Rotas ativadas
-        rotas_ativas = []
-        for _, row in df_rotas.iterrows():
-            if var_rota[row['ROTA_ID']].value() == 1:
-                rotas_ativas.append(row.to_dict())
-        
-        df_rotas_ativas = pd.DataFrame(rotas_ativas)
-        
-        # Calcular saldos finais
-        saldo_final = {}
-        for praca in pracas:
-            # SAQUE BB não consome saldo da origem
-            envios = df_rotas_ativas[
-                (df_rotas_ativas['ORIGEM'] == praca) &
-                (df_rotas_ativas['EMPRESA'] != 'SAQUE BB')
-            ]['VALOR_TRANSPORTADO'].sum()
-            
-            recebimentos = df_rotas_ativas[
-                df_rotas_ativas['DESTINO'] == praca
-            ]['VALOR_TRANSPORTADO'].sum()
-            
-            saldo_final[praca] = saldo_inicial[praca] - envios + recebimentos
-        
-        # Agrupar rotas idênticas
-        df_uso_rotas = df_rotas_ativas.groupby(
-            ['ORIGEM', 'DESTINO', 'EMPRESA', 'VALOR_TRANSPORTADO', 'CUSTO']
-        ).size().reset_index(name='VEZES_USADA')
-        
-        return {
-            'rotas_ativas': df_uso_rotas,
-            'saldo_pracas': pd.DataFrame({
-                'PRACA': pracas,
-                'SALDO_INICIAL': [saldo_inicial[p] for p in pracas],
-                'SALDO_FINAL': [saldo_final[p] for p in pracas],
-                'DIFERENCA': [saldo_final[p] - saldo_inicial[p] for p in pracas]
-            }),
-            'custo_total': sum(var_rota[id].value() * row['CUSTO'] 
-                           for id, row in df_rotas.set_index('ROTA_ID').iterrows()),
-            'status': 'Ótimo encontrado',
-            'transporte_total': df_rotas_ativas['VALOR_TRANSPORTADO'].sum()
-        }
-    else:
-        return {
-            'status': f"Solução não encontrada: {pulp.LpStatus[prob.status]}",
-            'rotas_ativas': pd.DataFrame(),
-            'saldo_pracas': pd.DataFrame(),
-            'custo_total': 0
-        }
+# Dados de exemplo (substitua pelos seus DataFrames reais)
+df_saldo_capacita = pd.DataFrame({
+    'PRACA': ['A', 'B', 'C', 'D', 'E'],
+    'SALDO': [100, -50, 200, -30, -20],
+    'DATA': ['2023-01-01']*5
+})
 
-# Exemplo de uso
-if __name__ == "__main__":
-    # Dados de exemplo mais complexos
-    data_saldos = {
-        'PRACA': ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
-        'SALDO': [150, 200, -80, -120, -100, 50, -50]
-    }
+df_custos_capacita = pd.DataFrame({
+    'ORIGEM': ['A', 'A', 'B', 'C', 'C', 'D'],
+    'DESTINO': ['B', 'C', 'D', 'D', 'E', 'E'],
+    'EMPRESA': ['T1', 'T1', 'T2', 'T1', 'T2', 'T1'],
+    'VALOR_TRANSPORTADO': [0]*6,  # Será definido pelo modelo
+    'CUSTO': [10, 15, 12, 8, 10, 5]
+})
+
+df_tx_saque = pd.DataFrame({
+    'PRACA': ['A', 'B', 'C', 'D', 'E'],
+    'TX_SAQUE': [0.02, 0.03, 0.025, 0.035, 0.04]
+})
+
+# 1. Preparar os dados
+pracas = df_saldo_capacita['PRACA'].unique()
+pracas_negativas = df_saldo_capacita[df_saldo_capacita['SALDO'] < 0]['PRACA'].tolist()
+pracas_positivas = df_saldo_capacita[df_saldo_capacita['SALDO'] > 0]['PRACA'].tolist()
+
+# Criar dicionários para saldos e taxas
+saldo = df_saldo_capacita.set_index('PRACA')['SALDO'].to_dict()
+tx_saque = df_tx_saque.set_index('PRACA')['TX_SAQUE'].to_dict()
+
+# Criar lista de rotas de transporte
+rotas = [(row['ORIGEM'], row['DESTINO']) for _, row in df_custos_capacita.iterrows()]
+custos_transporte = {(row['ORIGEM'], row['DESTINO']): row['CUSTO'] for _, row in df_custos_capacita.iterrows()}
+
+# 2. Criar o modelo de otimização
+modelo = pl.LpProblem("Abastecimento_Pracas", pl.LpMinimize)
+
+# 3. Variáveis de decisão
+# Quantidade transportada em cada rota
+x = pl.LpVariable.dicts("Transporte", rotas, lowBound=0, cat='Continuous')
+
+# Quantidade sacada em cada praça
+s = pl.LpVariable.dicts("Saque", pracas_negativas, lowBound=0, cat='Continuous')
+
+# 4. Função objetivo: Minimizar o custo total
+modelo += pl.lpSum([x[(i,j)] * custos_transporte[(i,j)] for (i,j) in rotas]) + \
+          pl.lpSum([s[p] * tx_saque[p] for p in pracas_negativas])
+
+# 5. Restrições
+# Restrição de saldo nas praças positivas (não pode transportar mais que o saldo disponível)
+for p in pracas_positivas:
+    total_transportado = pl.lpSum([x[(i,j)] for (i,j) in rotas if i == p])
+    modelo += total_transportado <= saldo[p]
+
+# Restrição de atendimento às praças negativas (transporte + saque deve cobrir o déficit)
+for p in pracas_negativas:
+    total_recebido = pl.lpSum([x[(i,j)] for (i,j) in rotas if j == p])
+    modelo += total_recebido + s[p] >= -saldo[p]
+
+# 6. Resolver o modelo
+modelo.solve()
+
+# 7. Processar os resultados
+if modelo.status == pl.LpStatusOptimal:
+    print("Solução ótima encontrada!")
     
-    data_rotas = {
-        'ORIGEM': ['A', 'A', 'B', 'B', 'B', 'F', 'G', 'X', 'X'],
-        'DESTINO': ['C', 'D', 'D', 'E', 'C', 'E', 'F', 'C', 'E'],
-        'EMPRESA': ['T1', 'T1', 'T2', 'T2', 'SAQUE BB', 'T3', 'T4', 'SAQUE BB', 'SAQUE BB'],
-        'VALOR_TRANSPORTADO': [50, 60, 70, 80, 90, 40, 30, 100, 120],
-        'CUSTO': [500, 600, 700, 800, 900, 400, 300, 1000, 1200]
-    }
+    # Coletar resultados de transporte
+    rotas_utilizadas = []
+    for (i,j) in rotas:
+        valor = x[(i,j)].varValue
+        if valor > 0:
+            rotas_utilizadas.append({
+                'ORIGEM': i,
+                'DESTINO': j,
+                'VALOR_TRANSPORTADO': valor,
+                'CUSTO_TOTAL': valor * custos_transporte[(i,j)]
+            })
     
-    df_saldos = pd.DataFrame(data_saldos)
-    df_rotas = pd.DataFrame(data_rotas)
+    # Coletar resultados de saque
+    saques_realizados = []
+    for p in pracas_negativas:
+        valor = s[p].varValue
+        if valor > 0:
+            saques_realizados.append({
+                'PRACA': p,
+                'VALOR_SACADO': valor,
+                'CUSTO_SAQUE': valor * tx_saque[p]
+            })
     
-    # Executar otimização
-    resultado = otimizar_transporte_final(df_saldos, df_rotas)
+    # Criar DataFrames com os resultados
+    df_rotas = pd.DataFrame(rotas_utilizadas)
+    df_saques = pd.DataFrame(saques_realizados)
     
-    # Exibir resultados
-    print("\n" + "="*60)
-    print(f"Status: {resultado['status']}")
-    print(f"Custo Total: R${resultado['custo_total']:,.2f}")
-    print(f"Volume Transportado: {resultado['transporte_total']} unidades")
+    # Calcular totais
+    custo_total = pl.value(modelo.objective)
+    total_transportado = df_rotas['VALOR_TRANSPORTADO'].sum()
+    total_sacado = df_saques['VALOR_SACADO'].sum()
     
-    print("\nSaldos:")
-    print(resultado['saldo_pracas'].to_string(index=False))
+    print("\nRotas de transporte utilizadas:")
+    print(df_rotas)
     
-    print("\nRotas Utilizadas:")
-    print(resultado['rotas_ativas'].to_string(index=False))
+    print("\nSaques realizados:")
+    print(df_saques)
+    
+    print(f"\nCusto total: {custo_total:.2f}")
+    print(f"Total transportado: {total_transportado:.2f}")
+    print(f"Total sacado: {total_sacado:.2f}")
+    
+    # 8. Encontrar rotas alternativas (5 melhores para cada praça)
+    print("\nCalculando rotas alternativas...")
+    rotas_alternativas = {}
+    
+    for p in pracas_negativas:
+        # Criar um novo modelo para encontrar soluções alternativas
+        modelo_alt = pl.LpProblem(f"Abastecimento_Alternativo_{p}", pl.LpMinimize)
+        
+        # Variáveis
+        x_alt = pl.LpVariable.dicts(f"Transporte_alt_{p}", rotas, lowBound=0, cat='Continuous')
+        s_alt = pl.LpVariable(f"Saque_alt_{p}", lowBound=0, cat='Continuous')
+        
+        # Função objetivo
+        modelo_alt += pl.lpSum([x_alt[(i,j)] * custos_transporte[(i,j)] for (i,j) in rotas]) + \
+                     s_alt * tx_saque[p]
+        
+        # Restrições
+        for origem in pracas_positivas:
+            total_transportado = pl.lpSum([x_alt[(i,j)] for (i,j) in rotas if i == origem])
+            modelo_alt += total_transportado <= saldo[origem]
+        
+        total_recebido = pl.lpSum([x_alt[(i,j)] for (i,j) in rotas if j == p])
+        modelo_alt += total_recebido + s_alt >= -saldo[p]
+        
+        # Resolver e coletar soluções alternativas
+        solucoes = []
+        for _ in range(5):
+            modelo_alt.solve()
+            if modelo_alt.status == pl.LpStatusOptimal:
+                solucao = {
+                    'CUSTO_TOTAL': pl.value(modelo_alt.objective),
+                    'SAQUE': s_alt.varValue,
+                    'TRANSPORTES': []
+                }
+                
+                for (i,j) in rotas:
+                    valor = x_alt[(i,j)].varValue
+                    if valor > 0:
+                        solucao['TRANSPORTES'].append({
+                            'ORIGEM': i,
+                            'DESTINO': j,
+                            'VALOR': valor
+                        })
+                
+                solucoes.append(solucao)
+                
+                # Adicionar restrição para evitar a mesma solução
+                modelo_alt += pl.lpSum([x_alt[(i,j)] for (i,j) in rotas]) <= total_recebido - 0.01
+            else:
+                break
+        
+        rotas_alternativas[p] = solucoes
+    
+    # Exibir rotas alternativas
+    print("\nRotas alternativas por praça:")
+    for p, solucoes in rotas_alternativas.items():
+        print(f"\nPraça {p}:")
+        for i, sol in enumerate(solucoes, 1):
+            print(f"  Opção {i}: Custo {sol['CUSTO_TOTAL']:.2f}")
+            print(f"    Saque: {sol['SAQUE']:.2f}")
+            for transp in sol['TRANSPORTES']:
+                print(f"    {transp['ORIGEM']} -> {transp['DESTINO']}: {transp['VALOR']:.2f}")
+    
+    # Converter rotas alternativas para DataFrame
+    dados_alternativos = []
+    for p, solucoes in rotas_alternativas.items():
+        for idx, sol in enumerate(solucoes, 1):
+            for transp in sol['TRANSPORTES']:
+                dados_alternativos.append({
+                    'PRACA_ALVO': p,
+                    'OPCAO': idx,
+                    'ORIGEM': transp['ORIGEM'],
+                    'DESTINO': transp['DESTINO'],
+                    'VALOR': transp['VALOR'],
+                    'CUSTO_UNIT': custos_transporte[(transp['ORIGEM'], transp['DESTINO'])],
+                    'CUSTO_TOTAL': transp['VALOR'] * custos_transporte[(transp['ORIGEM'], transp['DESTINO'])],
+                    'SAQUE': sol['SAQUE'],
+                    'CUSTO_SAQUE': sol['SAQUE'] * tx_saque[p],
+                    'CUSTO_TOTAL_OPCAO': sol['CUSTO_TOTAL']
+                })
+    
+    df_alternativas = pd.DataFrame(dados_alternativos)
+    
+else:
+    print("Não foi possível encontrar uma solução ótima.")
+
+# Retornar os DataFrames com os resultados
+df_resultados = {
+    'rotas_principais': df_rotas,
+    'saques': df_saques,
+    'rotas_alternativas': df_alternativas,
+    'totais': pd.DataFrame({
+        'CUSTO_TOTAL': [custo_total],
+        'TOTAL_TRANSPORTADO': [total_transportado],
+        'TOTAL_SACADO': [total_sacado]
+    })
+}
+
+df_resultados
