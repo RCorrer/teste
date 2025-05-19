@@ -2,16 +2,17 @@ import pandas as pd
 import itertools
 from collections import defaultdict
 
-def calcular_combinacoes_rotas(origem, destino, quantidade, df_rotas, n_melhores=5):
+def calcular_combinacoes_rotas(origem, destino, quantidade, df_rotas, max_intermediarias=3, n_melhores=5):
     """
     Calcula as melhores combinações de rotas para transportar uma quantidade entre origem e destino,
-    considerando qualquer número de intermediárias.
+    considerando até um número máximo de intermediárias.
     
     Parâmetros:
     origem - string com a praça de origem
     destino - string com a praça de destino
     quantidade - valor a ser transportado
     df_rotas - DataFrame com colunas: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
+    max_intermediarias - número máximo de praças intermediárias a considerar (padrão=3)
     n_melhores - número de melhores combinações a retornar (padrão=5)
     
     Retorna:
@@ -22,32 +23,26 @@ def calcular_combinacoes_rotas(origem, destino, quantidade, df_rotas, n_melhores
     rotas_disponiveis = df_rotas.to_dict('records')
     pracas = set(df_rotas['ORIGEM'].unique()).union(set(df_rotas['DESTINO'].unique()))
     
-    # 2. Encontrar todos os caminhos possíveis (sem limite de intermediárias)
+    # 2. Encontrar todos os caminhos possíveis com até max_intermediarias intermediárias
     caminhos = []
     
-    # Usaremos BFS com um limite prático para evitar loops infinitos
-    def encontrar_caminhos():
-        fila = [(origem, [origem])]
+    # Usaremos DFS com limite de profundidade
+    def encontrar_caminhos(atual, caminho_atual, intermediarias_usadas):
+        if atual == destino and len(caminho_atual) > 1:
+            caminhos.append(caminho_atual.copy())
+            return
         
-        while fila:
-            atual, caminho_atual = fila.pop(0)
-            
-            if atual == destino and len(caminho_atual) > 1:
-                caminhos.append(caminho_atual.copy())
-                continue
-            
-            # Limitar o comprimento do caminho para evitar caminhos absurdamente longos
-            if len(caminho_atual) > 10:  # Limite prático
-                continue
-                
-            # Procurar rotas que saem do nó atual
-            for rota in rotas_disponiveis:
-                if rota['ORIGEM'] == atual and rota['DESTINO'] not in caminho_atual:
-                    novo_caminho = caminho_atual.copy()
-                    novo_caminho.append(rota['DESTINO'])
-                    fila.append((rota['DESTINO'], novo_caminho))
+        if intermediarias_usadas >= max_intermediarias:
+            return
+        
+        # Procurar rotas que saem do nó atual
+        for rota in rotas_disponiveis:
+            if rota['ORIGEM'] == atual and rota['DESTINO'] not in caminho_atual:
+                caminho_atual.append(rota['DESTINO'])
+                encontrar_caminhos(rota['DESTINO'], caminho_atual, intermediarias_usadas + 1)
+                caminho_atual.pop()
     
-    encontrar_caminhos()
+    encontrar_caminhos(origem, [origem], 0)
     
     # 3. Para cada caminho possível, encontrar combinações de rotas que somam a quantidade
     combinacoes = []
