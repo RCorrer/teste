@@ -1,105 +1,101 @@
-import pulp
 import pandas as pd
+import itertools
+import networkx as nx
 
-def otimizar_transporte_capacidade_maxima(df_saldos, df_rotas):
+def calcular_combinacoes_rotas_nx(origem, destino, quantidade, df_rotas, max_intermediarias=3, n_melhores=5):
     """
-    Otimiza o transporte obrigando que as rotas selecionadas operem em capacidade máxima
-    
-    Parâmetros:
-    df_saldos - DataFrame com colunas: PRACA, SALDO, DATA
-    df_rotas - DataFrame com colunas: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
-    
-    Retorna:
-    DataFrame com as rotas selecionadas e suas quantidades (sempre na capacidade máxima)
+    Versão usando NetworkX para encontrar combinações de rotas.
     """
+    # 1. Criar o grafo direcionado
+    G = nx.DiGraph()
     
-    # Criar identificador único para cada rota
-    df_rotas = df_rotas.reset_index().rename(columns={'index': 'rota_id'})
+    # Adicionar arestas com atributos
+    for _, row in df_rotas.iterrows():
+        G.add_edge(row['ORIGEM'], row['DESTINO'], 
+                   empresa=row['EMPRESA'],
+                   valor=row['VALOR_TRANSPORTADO'],
+                   custo=row['CUSTO'])
     
-    # Criar o problema de otimização
-    prob = pulp.LpProblem("Transporte_com_Capacidade_Maxima", pulp.LpMinimize)
+    # 2. Encontrar todos os caminhos simples com comprimento limitado
+    try:
+        caminhos = list(nx.all_simple_paths(G, source=origem, target=destino, 
+                                          cutoff=max_intermediarias+1))
+    except nx.NetworkXNoPath:
+        return []
     
-    # Conjuntos
-    locais_positivos = df_saldos[df_saldos['SALDO'] > 0]['PRACA'].tolist()
-    locais_negativos = df_saldos[df_saldos['SALDO'] < 0]['PRACA'].tolist()
+    # 3. Processar cada caminho
+    combinacoes = []
     
-    # Variáveis de decisão binárias - indica se a rota é utilizada ou não
-    var_uso_rota = pulp.LpVariable.dicts(
-        "Usar_Rota",
-        df_rotas['rota_id'].tolist(),
-        cat='Binary'
-    )
-    
-    # Função objetivo: minimizar o custo total
-    prob += pulp.lpSum(
-        var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO'] * row['CUSTO']
-        for _, row in df_rotas.iterrows()
-    )
-    
-    # Restrição 1: Não exceder saldo disponível nos locais de origem
-    for local in locais_positivos:
-        prob += pulp.lpSum(
-            var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO']
-            for _, row in df_rotas[df_rotas['ORIGEM'] == local].iterrows()
-        ) <= df_saldos[df_saldos['PRACA'] == local]['SALDO'].values[0]
-    
-    # Restrição 2: Atender toda a demanda dos locais com saldo negativo
-    for local in locais_negativos:
-        prob += pulp.lpSum(
-            var_uso_rota[row['rota_id']] * row['VALOR_TRANSPORTADO']
-            for _, row in df_rotas[df_rotas['DESTINO'] == local].iterrows()
-        ) >= -df_saldos[df_saldos['PRACA'] == local]['SALDO'].values[0]
-    
-    # Resolver o problema
-    prob.solve()
-    
-    # Processar resultados
-    if pulp.LpStatus[prob.status] == 'Optimal':
-        resultados = []
-        for _, row in df_rotas.iterrows():
-            if var_uso_rota[row['rota_id']].value() == 1:
-                resultados.append({
-                    'ORIGEM': row['ORIGEM'],
-                    'DESTINO': row['DESTINO'],
-                    'EMPRESA': row['EMPRESA'],
-                    'Rota_ID': row['rota_id'],
-                    'VALOR_TRANSPORTADO': row['VALOR_TRANSPORTADO'],
-                    'CUSTO': row['CUSTO'],
-                    'CUSTO_TOTAL': row['VALOR_TRANSPORTADO'] * row['CUSTO']
-                })
+    for caminho in caminhos:
+        # Gerar todas as combinações de rotas possíveis para este caminho
+        edges_in_path = list(zip(caminho[:-1], caminho[1:]))
+        rotas_possiveis = []
         
-        df_resultados = pd.DataFrame(resultados)
-        custo_total = df_resultados['CUSTO_TOTAL'].sum()
-        print(f"Solução ótima encontrada! Custo total: R${custo_total:.2f}")
-        return df_resultados
-    else:
-        print("Não foi encontrada solução ótima.")
-        print("Status:", pulp.LpStatus[prob.status])
-        return None
+        for u, v in edges_in_path:
+            # Todas as rotas entre u e v
+            rotas_uv = []
+            for data in G.get_edge_data(u, v).values():
+                rotas_uv.append({
+                    'origem': u,
+                    'destino': v,
+                    'empresa': data['empresa'],
+                    'valor': data['valor'],
+                    'custo': data['custo']
+                })
+            rotas_possiveis.append(rotas_uv)
+        
+        # Gerar combinações de rotas para este caminho
+        for combinacao_rotas in itertools.product(*rotas_possiveis):
+            valor_min = min(rota['valor'] for rota in combinacao_rotas)
+            if valor_min == 0:
+                continue
+                
+            repeticoes = quantidade // valor_min
+            if quantidade % valor_min != 0:
+                repeticoes += 1
+                
+            custo_total = sum(rota['custo'] for rota in combinacao_rotas) * repeticoes
+            valor_total = valor_min * repeticoes
+            
+            combinacoes.append({
+                'caminho': caminho,
+                'rotas': combinacao_rotas,
+                'valor_transportado': valor_min,
+                'repeticoes': repeticoes,
+                'valor_total': valor_total,
+                'custo_total': custo_total,
+                'custo_por_unidade': custo_total / valor_total
+            })
+    
+    # 4. Ordenar e selecionar as melhores
+    combinacoes.sort(key=lambda x: x['custo_total'])
+    return combinacoes[:n_melhores]
 
 # Exemplo de uso
 if __name__ == "__main__":
-    # Dados de exemplo com as novas colunas
-    data_saldos = {
-        'PRACA': ['A', 'B', 'C', 'D', 'E'],
-        'SALDO': [100, 200, -80, -120, -100],
-        'DATA': ['2023-01-01', '2023-01-01', '2023-01-01', '2023-01-01', '2023-01-01']
-    }
-    
+    # Dados de exemplo
     data_rotas = {
-        'ORIGEM': ['A', 'A', 'A', 'B', 'B', 'B', 'B'],
-        'DESTINO': ['C', 'C', 'D', 'C', 'D', 'E', 'E'],
-        'EMPRESA': ['Trans1', 'Trans1', 'Trans1', 'Trans2', 'Trans2', 'Trans3', 'Trans3'],
-        'VALOR_TRANSPORTADO': [40, 50, 60, 70, 80, 90, 100],
-        'CUSTO': [10, 9, 15, 12, 18, 20, 19]
+        'ORIGEM': ['A', 'A', 'B', 'B', 'B', 'F', 'G', 'X', 'X', 'A', 'C', 'D', 'C', 'A', 'E', 'F'],
+        'DESTINO': ['C', 'D', 'D', 'E', 'C', 'E', 'F', 'C', 'E', 'F', 'E', 'E', 'F', 'B', 'G', 'G'],
+        'EMPRESA': ['T1', 'T1', 'T2', 'T2', 'SAQUE BB', 'T3', 'T4', 'SAQUE BB', 'SAQUE BB', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11'],
+        'VALOR_TRANSPORTADO': [50, 60, 70, 80, 90, 40, 30, 100, 120, 20, 30, 40, 50, 55, 60, 70],
+        'CUSTO': [500, 600, 700, 800, 900, 400, 300, 1000, 1200, 200, 300, 400, 500, 550, 600, 700]
     }
     
-    df_saldos = pd.DataFrame(data_saldos)
     df_rotas = pd.DataFrame(data_rotas)
     
-    # Executar a otimização
-    resultado = otimizar_transporte_capacidade_maxima(df_saldos, df_rotas)
+    origem = 'A'
+    destino = 'G'
+    quantidade = 200
     
-    if resultado is not None:
-        print("\nRotas selecionadas:")
-        print(resultado[['ORIGEM', 'DESTINO', 'EMPRESA', 'VALOR_TRANSPORTADO', 'CUSTO_TOTAL']])
+    print("Calculando com NetworkX...")
+    resultados_nx = calcular_combinacoes_rotas_nx(origem, destino, quantidade, df_rotas)
+    
+    for i, res in enumerate(resultados_nx, 1):
+        print(f"\nCombinação #{i}")
+        print(f"Caminho: {' → '.join(res['caminho'])}")
+        print(f"Custo Total: R${res['custo_total']:,.2f}")
+        print(f"Valor Transportado: {res['valor_total']}")
+        print("Rotas:")
+        for rota in res['rotas']:
+            print(f"  {rota['origem']}→{rota['destino']} ({rota['empresa']}) - Valor: {rota['valor']} - Custo: R${rota['custo']}")
