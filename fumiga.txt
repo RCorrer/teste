@@ -1,0 +1,216 @@
+import pandas as pd
+import numpy as np
+from collections import defaultdict, deque
+
+def inicializar_feromonios(df_rotas):
+    """Inicializa os níveis de feromônio para todas as rotas"""
+    feromonios = defaultdict(float)
+    for _, rota in df_rotas.iterrows():
+        feromonios[(rota['ORIGEM'], rota['DESTINO'])] = 1.0
+    return feromonios
+
+def construir_caminho(origem, destino, feromonios, df_rotas, alpha, beta):
+    """Constroi um caminho aleatório guiado por feromônios"""
+    caminho = [origem]
+    atual = origem
+    
+    while atual != destino:
+        # Obter todas as rotas saindo do nó atual
+        rotas_saindo = df_rotas[df_rotas['ORIGEM'] == atual]
+        rotas_saindo = rotas_saindo[~rotas_saindo['DESTINO'].isin(caminho)]  # Evitar ciclos
+        
+        if rotas_saindo.empty:
+            return None  # Caminho inválido
+        
+        # Calcular probabilidades
+        probabilidades = []
+        for _, rota in rotas_saindo.iterrows():
+            feromonio = feromonios[(rota['ORIGEM'], rota['DESTINO'])]
+            heuristica = 1 / rota['CUSTO']  # Quanto menor o custo, melhor
+            probabilidades.append((feromonio ** alpha) * (heuristica ** beta))
+        
+        probabilidades = np.array(probabilidades)
+        probabilidades /= probabilidades.sum()  # Normalizar
+        
+        # Escolher próxima rota
+        proxima_rota = rotas_saindo.iloc[np.random.choice(len(rotas_saindo), p=probabilidades)]
+        caminho.append(proxima_rota['DESTINO'])
+        atual = proxima_rota['DESTINO']
+    
+    return caminho
+
+def calcular_custo_caminho(caminho, df_rotas, quantidade):
+    """Calcula o custo total e repetições necessárias para um caminho"""
+    if not caminho:
+        return float('inf'), 0
+    
+    valor_min = float('inf')
+    custo_total = 0
+    
+    # Encontrar o valor mínimo transportado e calcular custo
+    for i in range(len(caminho)-1):
+        origem = caminho[i]
+        destino = caminho[i+1]
+        
+        rotas = df_rotas[(df_rotas['ORIGEM'] == origem) & 
+                         (df_rotas['DESTINO'] == destino)]
+        
+        if rotas.empty:
+            return float('inf'), 0
+        
+        melhor_rota = rotas.loc[rotas['CUSTO'].idxmin()]
+        valor_min = min(valor_min, melhor_rota['VALOR_TRANSPORTADO'])
+        custo_total += melhor_rota['CUSTO']
+    
+    if valor_min <= 0:
+        return float('inf'), 0
+    
+    repeticoes = quantidade // valor_min
+    if quantidade % valor_min != 0:
+        repeticoes += 1
+    
+    return custo_total * repeticoes, repeticoes
+
+def atualizar_feromonios(feromonios, caminhos, evaporacao, Q):
+    """Atualiza os níveis de feromônio"""
+    # Evaporação
+    for key in feromonios:
+        feromonios[key] *= (1 - evaporacao)
+    
+    # Depósito de feromônio pelos melhores caminhos
+    for caminho, custo in caminhos:
+        if custo == 0:
+            continue
+            
+        for i in range(len(caminho)-1):
+            origem = caminho[i]
+            destino = caminho[i+1]
+            feromonios[(origem, destino)] += Q / custo
+    
+    return feromonios
+
+def aco_melhores_rotas(df_rotas, origem, destino, quantidade, 
+                      n_formigas=20, iteracoes=50, alpha=1, beta=3, 
+                      evaporacao=0.4, Q=100, n_melhores=5):
+    """
+    Encontra as n_melhores rotas usando ACO.
+    
+    Parâmetros:
+    df_rotas - DataFrame com colunas: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
+    origem - ponto de partida
+    destino - ponto de chegada
+    quantidade - quantidade a ser transportada
+    n_formigas - número de formigas por iteração
+    iteracoes - número de iterações
+    alpha - importância do feromônio
+    beta - importância da heurística (1/custo)
+    evaporacao - taxa de evaporação
+    Q - constante para atualização
+    n_melhores - número de melhores caminhos a retornar
+    
+    Retorna:
+    Lista de dicionários com os melhores caminhos ordenados por custo
+    """
+    feromonios = inicializar_feromonios(df_rotas)
+    melhores_caminhos = deque(maxlen=n_melhores)
+    
+    for _ in range(iteracoes):
+        caminhos_iteracao = []
+        
+        # Construir caminhos para cada formiga
+        for _ in range(n_formigas):
+            caminho = construir_caminho(origem, destino, feromonios, df_rotas, alpha, beta)
+            if caminho:
+                custo, repeticoes = calcular_custo_caminho(caminho, df_rotas, quantidade)
+                caminhos_iteracao.append((caminho, custo))
+        
+        # Ordenar caminhos da iteração por custo
+        caminhos_iteracao.sort(key=lambda x: x[1])
+        
+        # Atualizar melhores caminhos globais
+        for caminho, custo in caminhos_iteracao:
+            # Verificar se já não temos um caminho igual
+            existente = next((c for c in melhores_caminhos if c['caminho'] == caminho), None)
+            
+            if not existente:
+                if len(melhores_caminhos) < n_melhores or custo < melhores_caminhos[-1]['custo_total']:
+                    # Adicionar ou substituir o pior caminho
+                    if len(melhores_caminhos) == n_melhores:
+                        melhores_caminhos.pop()
+                    
+                    melhores_caminhos.append({
+                        'caminho': caminho,
+                        'custo_total': custo,
+                        'repeticoes': repeticoes
+                    })
+                    # Manter ordenado
+                    melhores_caminhos = deque(sorted(melhores_caminhos, key=lambda x: x['custo_total']), 
+                                            maxlen=n_melhores)
+        
+        # Atualizar feromônios com os melhores caminhos da iteração
+        feromonios = atualizar_feromonios(feromonios, caminhos_iteracao[:5], evaporacao, Q)
+    
+    # Formatar resultado final
+    resultados = []
+    for rank, caminho_info in enumerate(sorted(melhores_caminhos, key=lambda x: x['custo_total']), 1):
+        caminho = caminho_info['caminho']
+        detalhes_rotas = []
+        
+        for i in range(len(caminho)-1):
+            origem_etapa = caminho[i]
+            destino_etapa = caminho[i+1]
+            
+            # Encontrar a melhor rota para esta etapa
+            rota = df_rotas[(df_rotas['ORIGEM'] == origem_etapa) & 
+                           (df_rotas['DESTINO'] == destino_etapa)].nsmallest(1, 'CUSTO').iloc[0]
+            
+            detalhes_rotas.append({
+                'origem': rota['ORIGEM'],
+                'destino': rota['DESTINO'],
+                'empresa': rota['EMPRESA'],
+                'valor_transportado': rota['VALOR_TRANSPORTADO'],
+                'custo': rota['CUSTO']
+            })
+        
+        resultados.append({
+            'rank': rank,
+            'caminho': " → ".join(caminho),
+            'custo_total': caminho_info['custo_total'],
+            'repeticoes': caminho_info['repeticoes'],
+            'rotas': detalhes_rotas
+        })
+    
+    return resultados
+
+# Exemplo de uso
+if __name__ == "__main__":
+    # Dados de exemplo
+    data_rotas = {
+        'ORIGEM': ['A', 'A', 'B', 'B', 'C', 'C', 'D', 'D', 'A', 'E', 'F'],
+        'DESTINO': ['B', 'C', 'C', 'D', 'D', 'E', 'E', 'F', 'E', 'F', 'G'],
+        'EMPRESA': ['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11'],
+        'VALOR_TRANSPORTADO': [50, 60, 70, 80, 90, 40, 30, 100, 55, 65, 75],
+        'CUSTO': [500, 600, 700, 800, 900, 400, 300, 1000, 550, 650, 750]
+    }
+    
+    df_rotas = pd.DataFrame(data_rotas)
+    
+    # Parâmetros da busca
+    origem = 'A'
+    destino = 'G'
+    quantidade = 200
+    
+    print(f"Calculando as 5 melhores rotas de {origem} para {destino} para transportar {quantidade}...")
+    melhores_rotas = aco_melhores_rotas(df_rotas, origem, destino, quantidade)
+    
+    for rota in melhores_rotas:
+        print("\n" + "="*60)
+        print(f"Rota #{rota['rank']} - Custo Total: R${rota['custo_total']:,.2f}")
+        print(f"Caminho: {rota['caminho']}")
+        print(f"Repetições necessárias: {rota['repeticoes']}")
+        
+        print("\nDetalhes das rotas:")
+        for i, etapa in enumerate(rota['rotas'], 1):
+            print(f"Etapa {i}: {etapa['origem']} → {etapa['destino']} "
+                  f"({etapa['empresa']}) - Valor: {etapa['valor_transportado']} "
+                  f"- Custo: R${etapa['custo']:,.2f}")
