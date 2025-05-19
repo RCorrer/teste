@@ -1,0 +1,163 @@
+import pandas as pd
+import itertools
+from collections import defaultdict
+
+def calcular_combinacoes_rotas(origem, destino, quantidade, df_rotas, max_intermediarias=3, n_melhores=5):
+    """
+    Calcula as melhores combinações de rotas para transportar uma quantidade entre origem e destino,
+    considerando até um número máximo de intermediárias.
+    
+    Parâmetros:
+    origem - string com a praça de origem
+    destino - string com a praça de destino
+    quantidade - valor a ser transportado
+    df_rotas - DataFrame com colunas: ORIGEM, DESTINO, EMPRESA, VALOR_TRANSPORTADO, CUSTO
+    max_intermediarias - número máximo de praças intermediárias a considerar (padrão=3)
+    n_melhores - número de melhores combinações a retornar (padrão=5)
+    
+    Retorna:
+    Lista de dicionários com as melhores combinações ordenadas por custo total
+    """
+    
+    # 1. Pré-processamento dos dados
+    rotas_disponiveis = df_rotas.to_dict('records')
+    pracas = set(df_rotas['ORIGEM'].unique()).union(set(df_rotas['DESTINO'].unique()))
+    
+    # 2. Encontrar todos os caminhos possíveis com até max_intermediarias intermediárias
+    caminhos = []
+    
+    # Usaremos DFS com limite de profundidade
+    def encontrar_caminhos(atual, caminho_atual, intermediarias_usadas):
+        if atual == destino and len(caminho_atual) > 1:
+            caminhos.append(caminho_atual.copy())
+            return
+        
+        if intermediarias_usadas >= max_intermediarias:
+            return
+        
+        # Procurar rotas que saem do nó atual
+        for rota in rotas_disponiveis:
+            if rota['ORIGEM'] == atual and rota['DESTINO'] not in caminho_atual:
+                caminho_atual.append(rota['DESTINO'])
+                encontrar_caminhos(rota['DESTINO'], caminho_atual, intermediarias_usadas + 1)
+                caminho_atual.pop()
+    
+    encontrar_caminhos(origem, [origem], 0)
+    
+    # 3. Para cada caminho possível, encontrar combinações de rotas que somam a quantidade
+    combinacoes = []
+    
+    for caminho in caminhos:
+        # Gerar sequência de rotas para este caminho
+        sequencia_rotas = []
+        for i in range(len(caminho)-1):
+            origem_etapa = caminho[i]
+            destino_etapa = caminho[i+1]
+            
+            # Todas as rotas que conectam origem_etapa -> destino_etapa
+            rotas_etapa = [r for r in rotas_disponiveis 
+                          if r['ORIGEM'] == origem_etapa and r['DESTINO'] == destino_etapa]
+            
+            sequencia_rotas.append(rotas_etapa)
+        
+        # Gerar combinações possíveis de rotas para este caminho
+        for combinacao_etapas in itertools.product(*sequencia_rotas):
+            # Criar uma combinação básica
+            combinacao_base = {
+                'caminho': caminho,
+                'rotas': combinacao_etapas,
+                'valor_transportado': min(rota['VALOR_TRANSPORTADO'] for rota in combinacao_etapas),
+                'custo_total': sum(rota['CUSTO'] for rota in combinacao_etapas)
+            }
+            
+            # Calcular quantas vezes precisamos repetir esta combinação para transportar a quantidade
+            if combinacao_base['valor_transportado'] > 0:
+                repeticoes = quantidade // combinacao_base['valor_transportado']
+                if quantidade % combinacao_base['valor_transportado'] != 0:
+                    repeticoes += 1
+                
+                # Adicionar a combinação completa
+                combinacoes.append({
+                    'caminho': caminho,
+                    'rotas': combinacao_etapas,
+                    'valor_transportado': combinacao_base['valor_transportado'],
+                    'repeticoes': repeticoes,
+                    'valor_total': combinacao_base['valor_transportado'] * repeticoes,
+                    'custo_total': combinacao_base['custo_total'] * repeticoes,
+                    'custo_por_unidade': (combinacao_base['custo_total'] * repeticoes) / (combinacao_base['valor_transportado'] * repeticoes)
+                })
+    
+    # 4. Ordenar combinações por custo total e selecionar as n_melhores
+    combinacoes_ordenadas = sorted(combinacoes, key=lambda x: x['custo_total'])
+    
+    # Remover duplicatas (combinações com mesmo caminho e mesmo custo)
+    seen = set()
+    combinacoes_unicas = []
+    for comb in combinacoes_ordenadas:
+        key = (tuple(comb['caminho']), comb['custo_total'])
+        if key not in seen:
+            seen.add(key)
+            combinacoes_unicas.append(comb)
+    
+    melhores_combinacoes = combinacoes_unicas[:n_melhores]
+    
+    # 5. Formatar resultado
+    resultados = []
+    for i, comb in enumerate(melhores_combinacoes, 1):
+        detalhes_rotas = []
+        for rota in comb['rotas']:
+            detalhes_rotas.append({
+                'origem': rota['ORIGEM'],
+                'destino': rota['DESTINO'],
+                'empresa': rota['EMPRESA'],
+                'valor_transportado': rota['VALOR_TRANSPORTADO'],
+                'custo': rota['CUSTO']
+            })
+        
+        resultados.append({
+            'rank': i,
+            'caminho': " → ".join(comb['caminho']),
+            'custo_total': comb['custo_total'],
+            'valor_total': comb['valor_total'],
+            'custo_por_unidade': comb['custo_por_unidade'],
+            'repeticoes': comb['repeticoes'],
+            'rotas': detalhes_rotas
+        })
+    
+    return resultados
+
+# Exemplo de uso
+if __name__ == "__main__":
+    # Dados de exemplo mais complexos
+    data_rotas = {
+        'ORIGEM': ['A', 'A', 'B', 'B', 'B', 'F', 'G', 'X', 'X', 'A', 'C', 'D', 'C', 'A', 'E', 'F'],
+        'DESTINO': ['C', 'D', 'D', 'E', 'C', 'E', 'F', 'C', 'E', 'F', 'E', 'E', 'F', 'B', 'G', 'G'],
+        'EMPRESA': ['T1', 'T1', 'T2', 'T2', 'SAQUE BB', 'T3', 'T4', 'SAQUE BB', 'SAQUE BB', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11'],
+        'VALOR_TRANSPORTADO': [50, 60, 70, 80, 90, 40, 30, 100, 120, 20, 30, 40, 50, 55, 60, 70],
+        'CUSTO': [500, 600, 700, 800, 900, 400, 300, 1000, 1200, 200, 300, 400, 500, 550, 600, 700]
+    }
+    
+    df_rotas = pd.DataFrame(data_rotas)
+    
+    # Testar a função
+    origem = 'A'
+    destino = 'G'
+    quantidade = 200
+    
+    print(f"\nCalculando melhores rotas para transportar {quantidade} de {origem} para {destino}...")
+    combinacoes = calcular_combinacoes_rotas(origem, destino, quantidade, df_rotas)
+    
+    for comb in combinacoes:
+        print("\n" + "="*60)
+        print(f"Combinação #{comb['rank']}")
+        print(f"Caminho: {comb['caminho']}")
+        print(f"Custo Total: R${comb['custo_total']:,.2f}")
+        print(f"Valor Total Transportado: {comb['valor_total']}")
+        print(f"Custo por Unidade: R${comb['custo_por_unidade']:,.2f}")
+        print(f"Repetições necessárias: {comb['repeticoes']}")
+        
+        print("\nRotas utilizadas:")
+        for i, rota in enumerate(comb['rotas'], 1):
+            print(f"Etapa {i}: {rota['origem']} → {rota['destino']} "
+                  f"({rota['empresa']}) - Valor: {rota['valor_transportado']} "
+                  f"- Custo: R${rota['custo']:,.2f}")
